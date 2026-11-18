@@ -50,6 +50,9 @@ class _AddReceiptScreenState extends State<AddReceiptScreen> {
   bool get _isMobilePlatform =>
       !kIsWeb && (Platform.isAndroid || Platform.isIOS);
 
+  bool get _isDesktopPlatform =>
+      !kIsWeb && (Platform.isWindows || Platform.isLinux || Platform.isMacOS);
+
   @override
   void initState() {
     super.initState();
@@ -434,6 +437,22 @@ class _AddReceiptScreenState extends State<AddReceiptScreen> {
                                   ),
                                 ),
                               ],
+                            ),
+                            const SizedBox(height: 8),
+                          ] else if (_isDesktopPlatform &&
+                              OcrService.isSupported) ...[
+                            FilledButton.tonalIcon(
+                              onPressed: _isRecognizingOcr
+                                  ? null
+                                  : _pickGalleryPhotos,
+                              icon: const Icon(
+                                Icons.add_photo_alternate_outlined,
+                              ),
+                              label: Text(
+                                _photoPaths.isEmpty
+                                    ? 'Загрузить фото / скрин чека (можно несколько)'
+                                    : '+ Загрузить ещё фото чека',
+                              ),
                             ),
                             const SizedBox(height: 8),
                           ],
