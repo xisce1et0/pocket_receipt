@@ -280,7 +280,7 @@ List<String> _mergeWrappedPriceLines(List<String> rawLines) {
     r'^[=\-~—]\s*(\d{1,3}(?:\s\d{3})*[.,]\d{2}|\d+[.,]\d{2})\s*[₽АБВГA-C]?$',
   );
   final orphanMultRegex = RegExp(
-    r'^[*xх×]\s*\d+(?:[.,]\d+)?\s*(?:шт\.?|wt\.?|ut\.?|шt\.?|т\.?|кг|г|л|мл|уп)?(?:\s*=\s*\d+[.,]\d{2})?\s*$',
+    r'^[*xх×]\s*\d+(?:[.,]\d+)?\s*(?:[а-яА-ЯёЁa-zA-Z]{1,5}\.?)?(?:\s*=\s*\d+[.,]\d{2})?\s*$',
     caseSensitive: false,
   );
 
@@ -288,7 +288,6 @@ List<String> _mergeWrappedPriceLines(List<String> rawLines) {
     final orphanMatch = orphanResultRegex.firstMatch(line);
     if (orphanMatch != null && merged.isNotEmpty) {
       final prev = merged.last;
-      // Не склеиваем верхнюю сумму списания из банка (вроде "- 1 729,80 ₽") с названием магазина!
       final isBankMinusHeader =
           line.startsWith('-') && line.contains('₽') && !prev.contains('*');
       if (!isBankMinusHeader &&
@@ -351,6 +350,27 @@ String? _extractStoreName(List<String> lines) {
     for (final entry in knownStores.entries) {
       if (norm.contains(entry.key)) {
         return entry.value;
+      }
+    }
+  }
+
+  // Пробуем достать название магазина из строки "Место расчетов   МАГАЗИН ..."
+  for (final line in lines) {
+    final norm = _normalizeHomoglyphs(line);
+    if (norm.contains('место расчет')) {
+      final after = line
+          .replaceFirst(
+            RegExp(r'^.*место\s+расчет[а-я]*[:\s]*', caseSensitive: false),
+            '',
+          )
+          .trim();
+      final afterNorm = _normalizeHomoglyphs(after);
+      if (after.length >= 4 &&
+          RegExp(r'[а-яА-ЯёЁa-zA-Z]{4,}').hasMatch(after) &&
+          !afterNorm.startsWith('г.') &&
+          !afterNorm.startsWith('ул.') &&
+          !afterNorm.startsWith('респ')) {
+        return after.replaceAll(RegExp(r'[«»"]'), '').trim();
       }
     }
   }
@@ -446,7 +466,9 @@ DateTime? _extractDateFromLines(List<String> lines, {DateTime? nowOverride}) {
 
   for (final line in lines) {
     final norm = normalizeProductName(line);
-    if (norm.contains('сегодня')) return DateTime(refNow.year, refNow.month, refNow.day);
+    if (norm.contains('сегодня')) {
+      return DateTime(refNow.year, refNow.month, refNow.day);
+    }
     if (norm.contains('вчера')) {
       final y = refNow.subtract(const Duration(days: 1));
       return DateTime(y.year, y.month, y.day);
@@ -459,8 +481,9 @@ DateTime? _extractDateFromLines(List<String> lines, {DateTime? nowOverride}) {
 bool _isHeaderOrNoiseLine(String line) {
   final norm = _normalizeHomoglyphs(line);
   if (norm.contains('онлайн') && norm.contains('касса')) return true;
-  if (norm == 'ваша' || norm == 'чек' || norm == 'назад') return true;
-  // Строка состояния телефона (например "19:34 4G 95%")
+  if (norm == 'ваша' || norm == 'чек' || norm == 'назад' || norm == 'подарок') {
+    return true;
+  }
   if (RegExp(r'^\d{1,2}:\d{2}\b').hasMatch(norm)) return true;
 
   const noiseWords = [
@@ -477,6 +500,12 @@ bool _isHeaderOrNoiseLine(String line) {
     'огрн',
     'кассовый чек',
     'товарный чек',
+    'отсканируйте',
+    'предложения ограничен',
+    'g.atol',
+    'продажа №',
+    'откр.',
+    'закр.',
     'код оператора',
     'транзакц',
     'атол',
@@ -586,14 +615,14 @@ String _healOcrMathGlitches(String line) {
   double? topBankTotal;
   int idCounter = 0;
 
-  // Поддерживает пробелы в тысячах ("1 250,00"), символ ₽ и "р." / "руб."
+  // Универсальный шаблон для ЛЮБЫХ единиц измерения (КГ, KГ, ШТ., WT., УП., Л и т.д.)
   final pureMathRegex = RegExp(
-    r'^(?:(\d{1,3}(?:\s\d{3})*[.,]\d{2}|\d+[.,]\d+|\d{1,3}(?:\s\d{3})*|\d+)\s*(?:шт\.?|wt\.?|ut\.?|шt\.?|т\.?|кг|г|л|мл|уп)?\s*[xх*×]\s*(\d{1,3}(?:\s\d{3})*[.,]\d{2}|\d+[.,]\d+|\d{1,3}(?:\s\d{3})*|\d+)(?:\s*₽|\s+(?:руб\.?|р\.?|p\.?))?\s*(?:шт\.?|wt\.?|ut\.?|шt\.?|т\.?|кг|г|л|мл|уп)?(?:\s*(?:=|\s)\s*(\d{1,3}(?:\s\d{3})*[.,]\d{2}|\d+[.,]\d{2}|\d{1,3}(?:\s\d{3})*|\d+)(?:\s*₽|\s+(?:руб\.?|р\.?|p\.?))?)?|[=−-]?\s*(?:(\d{1,3}(?:\s\d{3})*[.,]\d{2}|\d+[.,]\d{2})(?:\s*₽|\s+(?:руб\.?|р\.?|p\.?))?|(\d{1,3}(?:\s\d{3})*|\d+)(?:\s*₽|\s+(?:руб\.?|р\.?|p\.?))))\s*[=*АБВГA-C]?\s*$',
+    r'^(?:(\d{1,3}(?:\s\d{3})*[.,]\d{2}|\d+[.,]\d+|\d{1,3}(?:\s\d{3})*|\d+)\s*(?:[а-яА-ЯёЁa-zA-Z]{1,5}\.?)?\s*[xх*×]\s*(\d{1,3}(?:\s\d{3})*[.,]\d{2}|\d+[.,]\d+|\d{1,3}(?:\s\d{3})*|\d+)(?:\s*₽|\s+(?:руб\.?|р\.?|p\.?))?\s*(?:[а-яА-ЯёЁa-zA-Z]{1,5}\.?)?(?:\s*(?:=|\s)\s*(\d{1,3}(?:\s\d{3})*[.,]\d{2}|\d+[.,]\d{2}|\d{1,3}(?:\s\d{3})*|\d+)(?:\s*₽|\s+(?:руб\.?|р\.?|p\.?))?)?|[=−-]?\s*(?:(\d{1,3}(?:\s\d{3})*[.,]\d{2}|\d+[.,]\d{2})(?:\s*₽|\s+(?:руб\.?|р\.?|p\.?))?|(\d{1,3}(?:\s\d{3})*|\d+)(?:\s*₽|\s+(?:руб\.?|р\.?|p\.?))))\s*[=*АБВГA-C]?\s*$',
     caseSensitive: false,
   );
 
   final inlineMathRegex = RegExp(
-    r'^(.+?)\s+(\d{1,3}(?:\s\d{3})*[.,]\d{2}|\d+[.,]\d+|\d{1,3}(?:\s\d{3})*|\d+)\s*(?:шт\.?|wt\.?|ut\.?|шt\.?|т\.?|кг|г|л|мл|уп)?\s*[xх*×]\s*(\d{1,3}(?:\s\d{3})*[.,]\d{2}|\d+[.,]\d+|\d{1,3}(?:\s\d{3})*|\d+)(?:\s*₽|\s+(?:руб\.?|р\.?|p\.?))?\s*(?:шт\.?|wt\.?|ut\.?|шt\.?|т\.?|кг|г|л|мл|уп)?(?:\s*(?:=|\s)\s*(\d{1,3}(?:\s\d{3})*[.,]\d{2}|\d+[.,]\d{2}|\d{1,3}(?:\s\d{3})*|\d+)(?:\s*₽|\s+(?:руб\.?|р\.?|p\.?))?)?\s*[=*АБВГA-C]?\s*$',
+    r'^(.+?)\s+(\d{1,3}(?:\s\d{3})*[.,]\d{2}|\d+[.,]\d+|\d{1,3}(?:\s\d{3})*|\d+)\s*(?:[а-яА-ЯёЁa-zA-Z]{1,5}\.?)?\s*[xх*×]\s*(\d{1,3}(?:\s\d{3})*[.,]\d{2}|\d+[.,]\d+|\d{1,3}(?:\s\d{3})*|\d+)(?:\s*₽|\s+(?:руб\.?|р\.?|p\.?))?\s*(?:[а-яА-ЯёЁa-zA-Z]{1,5}\.?)?(?:\s*(?:=|\s)\s*(\d{1,3}(?:\s\d{3})*[.,]\d{2}|\d+[.,]\d{2}|\d{1,3}(?:\s\d{3})*|\d+)(?:\s*₽|\s+(?:руб\.?|р\.?|p\.?))?)?\s*[=*АБВГA-C]?\s*$',
     caseSensitive: false,
   );
 
@@ -643,7 +672,6 @@ String _healOcrMathGlitches(String line) {
           secondNum != null &&
           items.isNotEmpty &&
           items.last.quantity == 1) {
-        // Банковский формат: сначала "Товар  179,80 ₽", а на следующей строке "2 шт × 89,90 ₽"
         final parsed = _resolveQtyAndPrice(
           firstNumStr: firstNum,
           secondNumStr: secondNum,
@@ -658,7 +686,6 @@ String _healOcrMathGlitches(String line) {
           );
         }
       } else if (items.isEmpty && singleNum != null) {
-        // Запоминаем верхнюю сумму списания из банковской шапки (например "- 1 729,80 ₽")
         if (line.contains('₽') ||
             line.startsWith('-') ||
             line.startsWith('−')) {

@@ -26,6 +26,26 @@ String _toCyrillicHomoglyphs(String input) {
 
 const List<({String group, List<String> keywords})> _groupRules = [
   (
+    group: 'Хозтовары',
+    keywords: [
+      'пакет',
+      'мыло',
+      'салф',
+      'т/б',
+      'туалет',
+      'бумаг',
+      'порош',
+      'мощ',
+      'шампун',
+      'щетк',
+      'губк',
+      'фольг',
+      'мешк',
+      'зп укр',
+      'зубн',
+    ],
+  ),
+  (
     group: 'Снеки',
     keywords: [
       'чипс',
@@ -84,7 +104,9 @@ const List<({String group, List<String> keywords})> _groupRules = [
       'грудк',
       'индейк',
       'свинин',
+      'свиной',
       'говядин',
+      'гуляш',
       'фарш',
       'сельдь',
       'рыб',
@@ -165,30 +187,8 @@ const List<({String group, List<String> keywords})> _groupRules = [
       'ягод',
     ],
   ),
-  (
-    group: 'Хозтовары',
-    keywords: [
-      'пакет',
-      'мыло',
-      'салф',
-      'т/б',
-      'туалет',
-      'бумаг',
-      'порош',
-      'мощ',
-      'шампун',
-      'паст',
-      'щетк',
-      'губк',
-      'фольг',
-      'мешк',
-      'зп укр',
-      'зубн',
-    ],
-  ),
 ];
 
-/// Автоматически определяет группу товара по ключевым словам (без брендов!)
 List<String> suggestGroupsForProduct(String productName) {
   final origNorm = normalizeProductName(productName);
   final homNorm = _toCyrillicHomoglyphs(productName);
