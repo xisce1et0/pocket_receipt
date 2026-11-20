@@ -6,6 +6,7 @@ import '../models/receipt.dart';
 import '../services/database_service.dart';
 import '../services/ocr_service.dart';
 import '../utils/auto_grouper.dart';
+import '../utils/neural_receipt_parser.dart';
 import '../utils/price_analytics.dart';
 import '../utils/receipt_parser.dart';
 import '../widgets/glass_ui.dart';
@@ -42,8 +43,11 @@ class _AddReceiptScreenState extends State<AddReceiptScreen> {
   double? _expectedQrTotal;
   List<String> _selectedGroups = [];
   final List<String> _photoPaths = [];
+  final Set<String> _recognizedPhotoPaths = {};
   final List<String> _ocrTexts = [];
   bool _isRecognizingOcr = false;
+  bool _cancelRequested = false;
+  String _busyStatusText = 'Распознаём чек...';
   bool _isSaving = false;
   final List<ReceiptItem> _items = [];
 
@@ -53,20 +57,20 @@ class _AddReceiptScreenState extends State<AddReceiptScreen> {
   bool get _isDesktopPlatform =>
       !kIsWeb && (Platform.isWindows || Platform.isLinux || Platform.isMacOS);
 
+  List<String> get _pendingPhotos =>
+      _photoPaths.where((p) => !_recognizedPhotoPaths.contains(p)).toList();
+
   @override
   void initState() {
     super.initState();
     if (widget.initialPhotoPaths.isNotEmpty) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) {
-          _processNewPhotos(widget.initialPhotoPaths);
-        }
-      });
+      _photoPaths.addAll(widget.initialPhotoPaths);
     }
   }
 
   @override
   void dispose() {
+    _cancelRequested = true;
     _itemPriceController.dispose();
     _itemQtyController.dispose();
     _groupInputController.dispose();
@@ -128,7 +132,7 @@ class _AddReceiptScreenState extends State<AddReceiptScreen> {
     final picker = ImagePicker();
     final picked = await picker.pickImage(source: ImageSource.camera);
     if (picked == null || !mounted) return;
-    await _processNewPhotos([picked.path]);
+    _attachPhotos([picked.path]);
   }
 
   Future<void> _pickGalleryPhotos() async {
@@ -136,29 +140,76 @@ class _AddReceiptScreenState extends State<AddReceiptScreen> {
     final picker = ImagePicker();
     final pickedList = await picker.pickMultiImage();
     if (pickedList.isEmpty || !mounted) return;
-    await _processNewPhotos(pickedList.map((f) => f.path).toList());
+    _attachPhotos(pickedList.map((f) => f.path).toList());
   }
 
-  Future<void> _processNewPhotos(List<String> newPaths) async {
+  void _attachPhotos(List<String> newPaths) {
     setState(() {
       _photoPaths.addAll(newPaths);
+    });
+  }
+
+  void _cancelRecognition() {
+    setState(() {
+      _cancelRequested = true;
+      _isRecognizingOcr = false;
+    });
+    _showMessage('Распознавание отменено');
+  }
+
+  Future<void> _recognizeAttachedPhotos({bool forceAll = false}) async {
+    if (_isRecognizingOcr || _photoPaths.isEmpty) return;
+
+    if (!OcrService.isSupported) {
+      _showMessage('Распознавание фото не поддерживается на этой платформе');
+      return;
+    }
+
+    final targets = forceAll ? List<String>.from(_photoPaths) : _pendingPhotos;
+    if (targets.isEmpty) return;
+
+    _cancelRequested = false;
+
+    setState(() {
+      if (forceAll) {
+        _recognizedPhotoPaths.clear();
+        _ocrTexts.clear();
+        _items.clear();
+        _expectedQrTotal = null;
+      }
       _isRecognizingOcr = true;
+      _busyStatusText = targets.length > 1
+          ? 'Фото 1 из ${targets.length}: распознаём...'
+          : 'Распознаём чек...';
     });
 
     int addedCount = 0;
     int skippedCount = 0;
 
     try {
-      for (final path in newPaths) {
+      for (int i = 0; i < targets.length; i++) {
+        if (_cancelRequested || !mounted) return;
+        final path = targets[i];
+
+        if (targets.length > 1) {
+          setState(() {
+            _busyStatusText =
+                'Фото ${i + 1} из ${targets.length}: распознаём...';
+          });
+        }
+
         final ocrText = await OcrService.recognizeReceiptText(path);
-        if (!mounted) return;
+        if (_cancelRequested || !mounted) return;
+
+        _recognizedPhotoPaths.add(path);
         if (ocrText == null || ocrText.trim().isEmpty) continue;
 
         _ocrTexts.add(ocrText);
-        final parsed = parseReceiptText(
+        final parsed = await NeuralReceiptParser.parse(
           ocrText,
           existingReceipts: widget.allReceipts,
         );
+        if (_cancelRequested || !mounted) return;
 
         final dedup = deduplicateOverlapItems(
           existingItems: _items,
@@ -173,7 +224,7 @@ class _AddReceiptScreenState extends State<AddReceiptScreen> {
           if (parsed.date != null && _expectedQrTotal == null) {
             _selectedDate = parsed.date!;
           }
-          if (parsed.totalSum != null && _expectedQrTotal == null) {
+          if (parsed.totalSum != null) {
             _expectedQrTotal = parsed.totalSum;
           }
           _items.addAll(dedup.newItems);
@@ -183,7 +234,7 @@ class _AddReceiptScreenState extends State<AddReceiptScreen> {
         skippedCount += dedup.skippedDuplicates;
       }
 
-      if (!mounted) return;
+      if (_cancelRequested || !mounted) return;
       setState(() => _isRecognizingOcr = false);
 
       if (addedCount > 0) {
@@ -193,20 +244,22 @@ class _AddReceiptScreenState extends State<AddReceiptScreen> {
         _showMessage('Распознано товаров: $addedCount$dedupNote');
       } else {
         _showMessage(
-          'Фото добавлено, но новые товары не определились (см. "Текст OCR")',
+          'Новые товары не определились (см. "Текст OCR")',
         );
       }
     } catch (e) {
-      if (!mounted) return;
+      if (_cancelRequested || !mounted) return;
       setState(() => _isRecognizingOcr = false);
-      _showMessage('Ошибка OCR: $e');
+      _showMessage(
+        'Ошибка OCR: ${e.toString().replaceFirst('Exception: ', '')}',
+      );
     }
   }
 
   void _showRawOcrDialog() {
     if (_ocrTexts.isEmpty) return;
     final combined = _ocrTexts.asMap().entries.map((e) {
-      return '--- Фото ${e.key + 1} ---\n${e.value}';
+      return '--- Фрагмент ${e.key + 1} ---\n${e.value}';
     }).join('\n\n');
 
     showDialog(
@@ -244,35 +297,48 @@ class _AddReceiptScreenState extends State<AddReceiptScreen> {
 
     if (rawText == null || rawText.trim().isEmpty || !mounted) return;
 
-    final parsed = parseReceiptText(
-      rawText,
-      existingReceipts: widget.allReceipts,
-    );
-
     setState(() {
-      if (parsed.storeName != null &&
-          (_storeController?.text ?? '').trim().isEmpty) {
-        _storeController?.text = parsed.storeName!;
-      }
-      if (parsed.date != null) {
-        _selectedDate = parsed.date!;
-      }
-      if (parsed.totalSum != null) {
-        _expectedQrTotal = parsed.totalSum;
-      }
-      if (parsed.items.isNotEmpty) {
-        _items.addAll(parsed.items);
-      }
+      _isRecognizingOcr = true;
+      _busyStatusText = 'Разбираем текст чека...';
     });
 
-    if (parsed.items.isNotEmpty) {
-      _showMessage('Распознано товаров: ${parsed.items.length}');
-    } else if (parsed.totalSum != null) {
-      _showMessage(
-        'QR распознан! Сумма по чеку: ${parsed.totalSum!.toStringAsFixed(2)} ₽',
+    try {
+      final parsed = await NeuralReceiptParser.parse(
+        rawText,
+        existingReceipts: widget.allReceipts,
       );
-    } else {
-      _showMessage('Не удалось распознать товары — проверьте текст');
+      if (!mounted) return;
+
+      setState(() {
+        _isRecognizingOcr = false;
+        if (parsed.storeName != null &&
+            (_storeController?.text ?? '').trim().isEmpty) {
+          _storeController?.text = parsed.storeName!;
+        }
+        if (parsed.date != null) {
+          _selectedDate = parsed.date!;
+        }
+        if (parsed.totalSum != null) {
+          _expectedQrTotal = parsed.totalSum;
+        }
+        if (parsed.items.isNotEmpty) {
+          _items.addAll(parsed.items);
+        }
+      });
+
+      if (parsed.items.isNotEmpty) {
+        _showMessage('Распознано товаров: ${parsed.items.length}');
+      } else if (parsed.totalSum != null) {
+        _showMessage(
+          'QR распознан! Сумма по чеку: ${parsed.totalSum!.toStringAsFixed(2)} ₽',
+        );
+      } else {
+        _showMessage('Не удалось распознать товары — проверьте текст');
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _isRecognizingOcr = false);
+      _showMessage('Ошибка разбора текста: $e');
     }
   }
 
@@ -379,6 +445,7 @@ class _AddReceiptScreenState extends State<AddReceiptScreen> {
     final qrTotal = _expectedQrTotal;
     final totalsMatch =
         qrTotal != null && (currentTotal - qrTotal).abs() < 0.01;
+    final pendingCount = _pendingPhotos.length;
 
     return GlassBackground(
       child: Scaffold(
@@ -450,35 +517,44 @@ class _AddReceiptScreenState extends State<AddReceiptScreen> {
                               ),
                               label: Text(
                                 _photoPaths.isEmpty
-                                    ? 'Загрузить фото / скрин чека (можно несколько)'
-                                    : '+ Загрузить ещё фото чека',
+                                    ? 'Выбрать фото / скрин чека (можно несколько)'
+                                    : '+ Добавить ещё фото чека',
                               ),
                             ),
                             const SizedBox(height: 8),
                           ],
                           OutlinedButton.icon(
-                            onPressed: _openPasteImportDialog,
+                            onPressed: _isRecognizingOcr
+                                ? null
+                                : _openPasteImportDialog,
                             icon: const Icon(Icons.text_snippet_outlined),
                             label: const Text('Вставить текст чека'),
                           ),
                           if (_isRecognizingOcr) ...[
                             const SizedBox(height: 12),
-                            const Row(
+                            Row(
                               mainAxisAlignment: MainAxisAlignment.center,
                               children: [
-                                SizedBox(
+                                const SizedBox(
                                   width: 20,
                                   height: 20,
                                   child: CircularProgressIndicator(
                                     strokeWidth: 2.5,
                                   ),
                                 ),
-                                SizedBox(width: 10),
-                                Text(
-                                  'Распознаём чек оффлайн...',
-                                  style: TextStyle(
-                                    color: GlassColors.textPrimary,
+                                const SizedBox(width: 10),
+                                Flexible(
+                                  child: Text(
+                                    _busyStatusText,
+                                    style: const TextStyle(
+                                      color: GlassColors.textPrimary,
+                                    ),
                                   ),
+                                ),
+                                const SizedBox(width: 8),
+                                TextButton(
+                                  onPressed: _cancelRecognition,
+                                  child: const Text('Отмена'),
                                 ),
                               ],
                             ),
@@ -486,6 +562,111 @@ class _AddReceiptScreenState extends State<AddReceiptScreen> {
                         ],
                       ),
                     ),
+                    if (_photoPaths.isNotEmpty) ...[
+                      const SizedBox(height: 10),
+                      GlassCard(
+                        padding: const EdgeInsets.all(10),
+                        useBlur: false,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            SizedBox(
+                              height: 100,
+                              child: ListView.separated(
+                                scrollDirection: Axis.horizontal,
+                                itemCount: _photoPaths.length,
+                                separatorBuilder: (context, index) =>
+                                    const SizedBox(width: 8),
+                                itemBuilder: (context, index) {
+                                  final path = _photoPaths[index];
+                                  return Stack(
+                                    children: [
+                                      ClipRRect(
+                                        borderRadius: BorderRadius.circular(10),
+                                        child: Image.file(
+                                          File(path),
+                                          height: 100,
+                                          width: 80,
+                                          fit: BoxFit.cover,
+                                        ),
+                                      ),
+                                      Positioned(
+                                        top: 3,
+                                        right: 3,
+                                        child: GestureDetector(
+                                          onTap: _isRecognizingOcr
+                                              ? null
+                                              : () {
+                                                  setState(() {
+                                                    _photoPaths.removeAt(index);
+                                                    _recognizedPhotoPaths
+                                                        .remove(path);
+                                                  });
+                                                },
+                                          child: const CircleAvatar(
+                                            radius: 11,
+                                            backgroundColor: Colors.black54,
+                                            child: Icon(
+                                              Icons.close,
+                                              size: 14,
+                                              color: Colors.white,
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  );
+                                },
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: Text(
+                                    'Прикреплено фото: ${_photoPaths.length}',
+                                    style: const TextStyle(
+                                      fontSize: 12,
+                                      color: GlassColors.textSecondary,
+                                    ),
+                                  ),
+                                ),
+                                if (_ocrTexts.isNotEmpty)
+                                  TextButton.icon(
+                                    onPressed: _showRawOcrDialog,
+                                    icon: const Icon(
+                                      Icons.article_outlined,
+                                      size: 18,
+                                    ),
+                                    label: const Text('Текст OCR'),
+                                  ),
+                              ],
+                            ),
+                            if (OcrService.isSupported) ...[
+                              const SizedBox(height: 6),
+                              FilledButton.icon(
+                                onPressed: _isRecognizingOcr
+                                    ? null
+                                    : () => _recognizeAttachedPhotos(
+                                          forceAll: pendingCount == 0,
+                                        ),
+                                icon: const Icon(
+                                  Icons.document_scanner_outlined,
+                                  size: 18,
+                                ),
+                                label: Text(
+                                  pendingCount == 0
+                                      ? 'Распознать все заново (${_photoPaths.length})'
+                                      : (_recognizedPhotoPaths.isEmpty
+                                          ? 'Распознать фото ($pendingCount)'
+                                          : 'Распознать новые фото ($pendingCount)'),
+                                ),
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+                    ],
                     if (qrTotal != null) ...[
                       const SizedBox(height: 10),
                       GlassCard(
@@ -513,83 +694,6 @@ class _AddReceiptScreenState extends State<AddReceiptScreen> {
                                   color: GlassColors.textPrimary,
                                 ),
                               ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                    if (_photoPaths.isNotEmpty) ...[
-                      const SizedBox(height: 10),
-                      GlassCard(
-                        padding: const EdgeInsets.all(10),
-                        useBlur: false,
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            SizedBox(
-                              height: 100,
-                              child: ListView.separated(
-                                scrollDirection: Axis.horizontal,
-                                itemCount: _photoPaths.length,
-                                separatorBuilder: (context, index) =>
-                                    const SizedBox(width: 8),
-                                itemBuilder: (context, index) {
-                                  return Stack(
-                                    children: [
-                                      ClipRRect(
-                                        borderRadius: BorderRadius.circular(10),
-                                        child: Image.file(
-                                          File(_photoPaths[index]),
-                                          height: 100,
-                                          width: 80,
-                                          fit: BoxFit.cover,
-                                        ),
-                                      ),
-                                      Positioned(
-                                        top: 3,
-                                        right: 3,
-                                        child: GestureDetector(
-                                          onTap: () {
-                                            setState(() {
-                                              _photoPaths.removeAt(index);
-                                            });
-                                          },
-                                          child: const CircleAvatar(
-                                            radius: 11,
-                                            backgroundColor: Colors.black54,
-                                            child: Icon(
-                                              Icons.close,
-                                              size: 14,
-                                              color: Colors.white,
-                                            ),
-                                          ),
-                                        ),
-                                      ),
-                                    ],
-                                  );
-                                },
-                              ),
-                            ),
-                            Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                              children: [
-                                Text(
-                                  'Прикреплено фото: ${_photoPaths.length}',
-                                  style: const TextStyle(
-                                    fontSize: 12,
-                                    color: GlassColors.textSecondary,
-                                  ),
-                                ),
-                                if (_ocrTexts.isNotEmpty)
-                                  TextButton.icon(
-                                    onPressed: _showRawOcrDialog,
-                                    icon: const Icon(
-                                      Icons.article_outlined,
-                                      size: 18,
-                                    ),
-                                    label: const Text('Текст OCR'),
-                                  ),
-                              ],
                             ),
                           ],
                         ),

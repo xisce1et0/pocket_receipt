@@ -29,25 +29,62 @@ class MainActivity : FlutterActivity() {
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, ocrChannelName)
             .setMethodCallHandler { call, result ->
-                if (call.method == "recognizeText") {
-                    val imagePath = call.argument<String>("imagePath")
-                    if (imagePath.isNullOrBlank()) {
-                        result.error("INVALID_ARGS", "imagePath is missing", null)
-                        return@setMethodCallHandler
-                    }
+                when (call.method) {
+                    "recognizeText" -> {
+                        val imagePath = call.argument<String>("imagePath")
+                        if (imagePath.isNullOrBlank()) {
+                            result.error("INVALID_ARGS", "imagePath is missing", null)
+                            return@setMethodCallHandler
+                        }
 
-                    executor.execute {
-                        try {
-                            val text = ocrEngine.recognizeText(imagePath)
-                            mainHandler.post { result.success(text) }
-                        } catch (e: Exception) {
-                            mainHandler.post {
-                                result.error("OCR_ERROR", e.message ?: "OCR failed", null)
+                        executor.execute {
+                            try {
+                                val text = ocrEngine.recognizeText(imagePath)
+                                mainHandler.post { result.success(text) }
+                            } catch (e: Exception) {
+                                mainHandler.post {
+                                    result.error("OCR_ERROR", e.message ?: "OCR failed", null)
+                                }
                             }
                         }
                     }
-                } else {
-                    result.notImplemented()
+
+                    "classifyReceiptLines" -> {
+                        val inputIds = call.argument<LongArray>("inputIds")
+                        val attentionMask = call.argument<LongArray>("attentionMask")
+                        val batchSize = call.argument<Int>("batchSize") ?: 0
+                        val seqLen = call.argument<Int>("seqLen") ?: 0
+
+                        if (inputIds == null || attentionMask == null || batchSize <= 0 || seqLen <= 0) {
+                            result.error("INVALID_ARGS", "Classifier arguments are missing or invalid", null)
+                            return@setMethodCallHandler
+                        }
+
+                        executor.execute {
+                            try {
+                                val (roleLogits, catLogits) = ocrEngine.classifyReceiptLines(
+                                    inputIds = inputIds,
+                                    attentionMask = attentionMask,
+                                    batchSize = batchSize,
+                                    seqLen = seqLen,
+                                )
+                                mainHandler.post {
+                                    result.success(
+                                        mapOf(
+                                            "roleLogits" to roleLogits,
+                                            "catLogits" to catLogits,
+                                        ),
+                                    )
+                                }
+                            } catch (e: Exception) {
+                                mainHandler.post {
+                                    result.error("CLF_ERROR", e.message ?: "Classification failed", null)
+                                }
+                            }
+                        }
+                    }
+
+                    else -> result.notImplemented()
                 }
             }
 

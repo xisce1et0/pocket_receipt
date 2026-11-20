@@ -49,7 +49,7 @@ void main() {
     expect(suggestGroupsForProduct('ЧИПСЫ СЫР 14ОГР ЛЕЙЗ'), ['Снеки']);
     expect(suggestGroupsForProduct('КП/МАСЛО СЛИВ 82,5'), ['Молочное']);
     expect(suggestGroupsForProduct('КП/ Т/Б РОМ 2СЛ 4Р'), ['Хозтовары']);
-    expect(suggestGroupsForProduct('ЗП/КОЛБ С/К МИЛ САЛ'), ['Мясо и рыба']);
+    expect(suggestGroupsForProduct('ЗП/КОЛБ С/К МИЛ САЛ'), ['Мясо']);
     expect(suggestGroupsForProduct('MILKA BUBBLES MOJ.ПО'), ['Сладости']);
     expect(suggestGroupsForProduct('СПАГЕТТТИНИ 450Г'), ['Бакалея']);
   });

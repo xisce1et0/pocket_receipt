@@ -71,6 +71,8 @@ flutter:
     - assets/ocr/det.onnx
     - assets/ocr/rec.onnx
     - assets/ocr/rec_inference.yml
+    - assets/ocr/receipt_clf_vocab.txt
+    - assets/ocr/receipt_clf.onnx
     - assets/icon/app_icon.png
 
   # To add assets to your application, add an assets section, like this:

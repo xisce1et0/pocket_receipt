@@ -21,6 +21,7 @@ import org.opencv.imgproc.Imgproc
 import java.io.File
 import java.io.FileOutputStream
 import java.nio.FloatBuffer
+import java.nio.LongBuffer
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.ceil
@@ -34,9 +35,11 @@ import kotlin.math.sin
 class NeuralOcrEngine(private val context: Context) {
 
     private var initialized = false
+    private var clfInitialized = false
     private lateinit var env: OrtEnvironment
     private lateinit var detSession: OrtSession
     private lateinit var recSession: OrtSession
+    private lateinit var clfSession: OrtSession
     private lateinit var dict: List<String>
 
     private data class TextBox(
@@ -67,10 +70,71 @@ class NeuralOcrEngine(private val context: Context) {
         )
 
         dict = parseDictionaryFromYml(ymlFile)
-        env = OrtEnvironment.getEnvironment()
+        if (!::env.isInitialized) {
+            env = OrtEnvironment.getEnvironment()
+        }
         detSession = env.createSession(detFile.absolutePath, OrtSession.SessionOptions())
         recSession = env.createSession(recFile.absolutePath, OrtSession.SessionOptions())
         initialized = true
+    }
+
+    @Synchronized
+    fun ensureClassifierInitialized() {
+        if (clfInitialized) return
+
+        val ocrDir = File(context.filesDir, "neural_ocr")
+        if (!ocrDir.exists()) ocrDir.mkdirs()
+
+        val clfFile = ensureAssetCopied(
+            "assets/ocr/receipt_clf.onnx",
+            File(ocrDir, "receipt_clf.onnx"),
+        )
+
+        if (!::env.isInitialized) {
+            env = OrtEnvironment.getEnvironment()
+        }
+        OrtSession.SessionOptions().use { opts ->
+            opts.setIntraOpNumThreads(4)
+            clfSession = env.createSession(clfFile.absolutePath, opts)
+        }
+        clfInitialized = true
+    }
+
+    fun classifyReceiptLines(
+        inputIds: LongArray,
+        attentionMask: LongArray,
+        batchSize: Int,
+        seqLen: Int,
+    ): Pair<FloatArray, FloatArray> {
+        ensureClassifierInitialized()
+
+        val expectedLen = batchSize * seqLen
+        if (batchSize <= 0 || seqLen <= 0 ||
+            inputIds.size != expectedLen || attentionMask.size != expectedLen
+        ) {
+            throw IllegalArgumentException("Некорректные размеры входных тензоров классификатора")
+        }
+
+        val shape = longArrayOf(batchSize.toLong(), seqLen.toLong())
+        OnnxTensor.createTensor(env, LongBuffer.wrap(inputIds), shape).use { idsTensor ->
+            OnnxTensor.createTensor(env, LongBuffer.wrap(attentionMask), shape).use { maskTensor ->
+                val inputs = mapOf(
+                    "input_ids" to idsTensor,
+                    "attention_mask" to maskTensor,
+                )
+                clfSession.run(inputs).use { results ->
+                    val roleBuf = (results[0] as OnnxTensor).floatBuffer
+                    val roleLogits = FloatArray(roleBuf.remaining())
+                    roleBuf.get(roleLogits)
+
+                    val catBuf = (results[1] as OnnxTensor).floatBuffer
+                    val catLogits = FloatArray(catBuf.remaining())
+                    catBuf.get(catLogits)
+
+                    return Pair(roleLogits, catLogits)
+                }
+            }
+        }
     }
 
     fun recognizeText(imagePath: String): String {
@@ -517,13 +581,19 @@ class NeuralOcrEngine(private val context: Context) {
 
     private fun ensureAssetCopied(assetPath: String, destFile: File): File {
         if (!destFile.exists() || destFile.length() == 0L) {
+            val tmpFile = File(destFile.parentFile, "${destFile.name}.tmp")
             val assetKey = FlutterInjector.instance()
                 .flutterLoader()
                 .getLookupKeyForAsset(assetPath)
             context.assets.open(assetKey).use { input ->
-                FileOutputStream(destFile).use { output ->
+                FileOutputStream(tmpFile).use { output ->
                     input.copyTo(output)
                 }
+            }
+            if (destFile.exists()) destFile.delete()
+            if (!tmpFile.renameTo(destFile)) {
+                tmpFile.copyTo(destFile, overwrite = true)
+                tmpFile.delete()
             }
         }
         return destFile
